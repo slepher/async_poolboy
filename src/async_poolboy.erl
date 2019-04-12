@@ -15,7 +15,10 @@
 -include_lib("erlando/include/gen_fun.hrl").
 
 -export([promise_checkout/1, checkin/2, call/3, promise_call/3, transaction/3, promise_transaction/3]).
+
 -export([child_spec/2, child_spec/3, child_spec/4, start/1, start/2, start_link/1, start_link/2]).
+
+%% imported from poolboy.
 -gen_fun(#{remote => poolboy, functions => [checkout/1, checkout/2, checkout/3, checkin/2, transaction/2,
                                             transaction/3, stop/1, status/1]}).
 
@@ -32,14 +35,6 @@
 -type pid_queue() :: queue().
 -else.
 -type pid_queue() :: queue:queue().
--endif.
-
--ifdef(OTP_RELEASE). %% this implies 21 or higher
--define(EXCEPTION(Class, Reason, Stacktrace), Class:Reason:Stacktrace).
--define(GET_STACK(Stacktrace), Stacktrace).
--else.
--define(EXCEPTION(Class, Reason, _), Class:Reason).
--define(GET_STACK(_), erlang:get_stacktrace()).
 -endif.
 
 % Copied from gen:start_ret/0
@@ -384,19 +379,29 @@ start_pool(StartFun, PoolArgs, WorkerArgs) ->
             gen_server:StartFun(Name, ?MODULE, {PoolArgs, WorkerArgs}, [])
     end.
 
+new_worker(Sup, _Pid, true) ->
+    new_worker(Sup);
+new_worker(_Sup, Pid, false) ->
+    Pid.
+
 new_worker(Sup) ->
     {ok, Pid} = supervisor:start_child(Sup, []),
     true = link(Pid),
     Pid.
 
-get_worker_with_strategy(Workers, fifo) ->
-    queue:out(Workers);
-get_worker_with_strategy(Workers, lifo) ->
-    queue:out_r(Workers).
+dismiss_worker(_Sup, _Pid, true) ->
+    ok;
+dismiss_worker(Sup, Pid, false) ->
+    dismiss_worker(Sup, Pid).
 
 dismiss_worker(Sup, Pid) ->
     true = unlink(Pid),
     supervisor:terminate_child(Sup, Pid).
+
+get_worker_with_strategy(Workers, fifo) ->
+    queue:out(Workers);
+get_worker_with_strategy(Workers, lifo) ->
+    queue:out_r(Workers).
 
 filter_worker_by_pid(Pid, Workers) ->
     queue:filter(fun (WPid) -> WPid =/= Pid end, Workers).
@@ -469,16 +474,6 @@ handle_checkin(Pid, Dismissed, State) ->
                     State1#state{waiting = Empty, workers = Workers1}
             end
     end.
-
-new_worker(Sup, _Pid, true) ->
-    new_worker(Sup);
-new_worker(_Sup, Pid, false) ->
-    Pid.
-
-dismiss_worker(_Sup, _Pid, true) ->
-    ok;
-dismiss_worker(Sup, Pid, false) ->
-    dismiss_worker(Sup, Pid).
 
 add_worker(Pid, {FromPid, _} = From, CRef, MRef, #state{monitors = Monitors, working_status = WorkingStatus} = State) ->
     WorkingStatus1 = poolboy_working_status:add_worker(FromPid, Pid, WorkingStatus),
