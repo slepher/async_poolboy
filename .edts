@@ -1,0 +1,4 @@
+:name "async"
+:node-name "async"
+:lib-dirs '("_build/default/lib" "_checkouts" "_build/test/lib")
+:app-include-dirs '("include")
