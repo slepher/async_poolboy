@@ -12,12 +12,13 @@
 -behaviour(gen_server).
 
 -include_lib("erlando/include/do.hrl").
-
+-include_lib("erlando/include/gen_fun.hrl").
 
 -export([promise_checkout/1, checkin/2, call/3, promise_call/3, transaction/3, promise_transaction/3]).
--export([checkout/1, checkout/2, checkout/3, transaction/2,
-         child_spec/2, child_spec/3, child_spec/4, start/1,
-         start/2, start_link/1, start_link/2, stop/1, status/1]).
+-export([child_spec/2, child_spec/3, child_spec/4, start/1, start/2, start_link/1, start_link/2]).
+-gen_fun(#{remote => poolboy, functions => [checkout/1, checkout/2, checkout/3, checkin/2, transaction/2,
+                                            transaction/3, stop/1, status/1]}).
+
 %% API
 -export([start_link/0]).
 
@@ -26,8 +27,6 @@
          terminate/2, code_change/3, format_status/2]).
 
 -define(SERVER, ?MODULE).
-
--define(TIMEOUT, 5000).
 
 -ifdef(pre17).
 -type pid_queue() :: queue().
@@ -42,13 +41,6 @@
 -define(EXCEPTION(Class, Reason, _), Class:Reason).
 -define(GET_STACK(_), erlang:get_stacktrace()).
 -endif.
-
--type pool() ::
-    Name :: (atom() | pid()) |
-    {Name :: atom(), node()} |
-    {local, Name :: atom()} |
-    {global, GlobalName :: any()} |
-    {via, Module :: atom(), ViaName :: any()}.
 
 % Copied from gen:start_ret/0
 -type start_ret() :: {'ok', pid()} | 'ignore' | {'error', term()}.
@@ -68,81 +60,6 @@
 %%%===================================================================
 %%% API
 %%%===================================================================
--spec checkout(Pool :: pool()) -> pid().
-checkout(Pool) ->
-    checkout(Pool, true).
-
--spec checkout(Pool :: pool(), Block :: boolean()) -> pid() | full.
-checkout(Pool, Options) when is_map(Options) ->
-    Options1 = maps:merge(#{pid => self()}, Options),
-    Timeout = maps:get(timeout, Options, ?TIMEOUT),
-    CRef = make_ref(),
-    try
-        gen_server:call(Pool, {checkout, CRef, Options1}, Timeout)
-    catch
-        ?EXCEPTION(Class, Reason, Stacktrace) ->
-            gen_server:cast(Pool, {cancel_waiting, CRef}),
-            erlang:raise(Class, Reason, ?GET_STACK(Stacktrace))
-    end;
-checkout(Pool, Block) ->
-    checkout(Pool, Block, ?TIMEOUT).
-
--spec checkout(Pool :: pool(), Block :: boolean(), Timeout :: timeout())
-    -> pid() | full.
-checkout(Pool, Block, Timeout) ->
-    checkout(Pool, #{block => Block, timeout => Timeout}).
-
-promise_checkout(Pool) ->
-    promise_checkout(Pool, #{}).
-
-promise_checkout(Pool, Options) ->
-    Options1 = maps:merge(#{pid => self()}, Options),
-    Timeout = maps:get(timeout, Options, infinity),
-    Ref = make_ref(),
-    do([async_m ||
-           Reply <- async_m:lift_final_reply(async_gen_server:promise_call(Pool, {checkout, Ref, Options1}, Timeout)),
-           case Reply of
-               {error, Reason} ->
-                   gen_server:cast(Pool, {cancel_waiting, Ref}),
-                   fail(Reason);
-               Worker ->
-                   async_m:pure_return(Worker)
-           end
-       ]).           
-
-checkin(Pool, Worker) ->
-    gen_server:cast(Pool, {checkin, Worker}).
-
-call(Pool, Args, Options) ->
-    Promise = promise_call(Pool, Args, Options),
-    async_m:wait(Promise).
-
-promise_call(Pool, Args, Options) ->
-    promise_transaction(Pool, fun(Worker) -> async_gen_server:promise_call(Worker, Args) end, Options).
-
--spec transaction(Pool :: pool(), Fun :: fun((Worker :: pid()) -> any()))
-    -> any().
-transaction(Pool, Fun) ->
-    transaction(Pool, Fun, ?TIMEOUT).
-
-transaction(Pool, Fun, Options) when is_map(Options) ->
-    Worker = checkout(Pool, Options),
-    try
-        Fun(Worker)
-    after
-        ok = checkin(Pool, Worker)
-    end;
-transaction(Pool, Fun, Timeout) ->
-    transaction(Pool, Fun, #{timeout => Timeout}).
-
-promise_transaction(Pool, Fun, Options) ->
-    do([async_m ||
-           Worker <- promise_checkout(Pool, Options),
-           Value <- try_fun(Pool, Fun, Worker),
-           ok = checkin(Pool, Worker),
-           return(Value)
-       ]).
-
 -spec child_spec(PoolId :: term(), PoolArgs :: proplists:proplist())
     -> supervisor:child_spec().
 child_spec(PoolId, PoolArgs) ->
@@ -161,15 +78,15 @@ child_spec(PoolId, PoolArgs, WorkerArgs) ->
                  ChildSpecFormat :: 'tuple' | 'map')
     -> supervisor:child_spec().
 child_spec(PoolId, PoolArgs, WorkerArgs, tuple) ->
-    {PoolId, {poolboy, start_link, [PoolArgs, WorkerArgs]},
-     permanent, 5000, worker, [poolboy]};
+    {PoolId, {?MODULE, start_link, [PoolArgs, WorkerArgs]},
+     permanent, 5000, worker, [?MODULE]};
 child_spec(PoolId, PoolArgs, WorkerArgs, map) ->
     #{id => PoolId,
-      start => {async_poolboy, start_link, [PoolArgs, WorkerArgs]},
+      start => {?MODULE, start_link, [PoolArgs, WorkerArgs]},
       restart => permanent,
       shutdown => 5000,
       type => worker,
-      modules => [poolboy]}.
+      modules => [?MODULE]}.
 
 -spec start(PoolArgs :: proplists:proplist())
     -> start_ret().
@@ -194,14 +111,38 @@ start_link(PoolArgs)  ->
 start_link(PoolArgs, WorkerArgs)  ->
     start_pool(start_link, PoolArgs, WorkerArgs).
 
--spec stop(Pool :: pool()) -> ok.
-stop(Pool) ->
-    gen_server:call(Pool, stop).
+promise_checkout(Pool) ->
+    promise_checkout(Pool, #{}).
 
--spec status(Pool :: pool()) -> {atom(), integer(), integer(), integer()}.
-status(Pool) ->
-    gen_server:call(Pool, status).
+promise_checkout(Pool, Options) ->
+    Options1 = maps:merge(#{pid => self()}, Options),
+    Timeout = maps:get(timeout, Options, infinity),
+    Ref = make_ref(),
+    do([async_m ||
+           Reply <- async_m:lift_final_reply(async_gen_server:promise_call(Pool, {checkout, Ref, Options1}, Timeout)),
+           case Reply of
+               {error, Reason} ->
+                   gen_server:cast(Pool, {cancel_waiting, Ref}),
+                   fail(Reason);
+               Worker ->
+                   async_m:pure_return(Worker)
+           end
+       ]).
 
+call(Pool, Args, Options) ->
+    Promise = promise_call(Pool, Args, Options),
+    async_m:wait(Promise).
+
+promise_call(Pool, Args, Options) ->
+    promise_transaction(Pool, fun(Worker) -> async_gen_server:promise_call(Worker, Args) end, Options).
+
+promise_transaction(Pool, Fun, Options) ->
+    do([async_m ||
+           Worker <- promise_checkout(Pool, Options),
+           Value <- try_fun(Pool, Fun, Worker),
+           ok = checkin(Pool, Worker),
+           return(Value)
+       ]).
 %%--------------------------------------------------------------------
 %% @doc
 %% Starts the server
@@ -267,9 +208,9 @@ init([], _WorkerArgs, #state{size = Size, supervisor = Sup} = State) ->
                          {noreply, NewState :: term(), hibernate} |
                          {stop, Reason :: term(), Reply :: term(), NewState :: term()} |
                          {stop, Reason :: term(), NewState :: term()}.
-handle_call({checkout, CRef, Options}, {FromPid, _} = From, State) ->
+handle_call({checkout, CRef, Block}, {FromPid, _} = From, State) ->
     MRef = erlang:monitor(process, FromPid),
-    State1 = handle_checkout(From, CRef, MRef, Options, State),
+    State1 = handle_checkout(From, CRef, MRef, Block, State),
     {noreply, State1};
 
 handle_call(status, _From, State) ->
@@ -470,14 +411,13 @@ prepopulate(0, _Sup, Workers) ->
 prepopulate(N, Sup, Workers) ->
     prepopulate(N-1, Sup, queue:in(new_worker(Sup), Workers)).
 
-handle_checkout({FromPid, _} = From, CRef, MRef, Options,
+handle_checkout({FromPid, _} = From, CRef, MRef, Block,
                 #state{supervisor = Sup, 
                        workers = Workers,
                        overflow = Overflow,
                        max_overflow = MaxOverflow,
                        strategy = Strategy,
                        working_status = WorkingStatus} = State) ->
-    Block = maps:get(block, Options, true),
     case poolboy_working_status:should_spawn(FromPid, WorkingStatus) of
         true ->
             Pid = new_worker(Sup),
