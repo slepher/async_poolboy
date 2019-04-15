@@ -14,6 +14,8 @@ init([]) ->
 
 handle_call(die, _From, State) ->
     {stop, {error, died}, dead, State};
+handle_call({action, Action}, _From, State) ->
+    {reply, Action(), State};
 handle_call(_Event, _From, State) ->
     {reply, ok, State}.
 

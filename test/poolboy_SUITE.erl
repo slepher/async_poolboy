@@ -22,6 +22,8 @@ suite() ->
 %% @end
 %%--------------------------------------------------------------------
 init_per_suite(Config) ->
+    dbg:tracer(),
+    dbg:p(all, [c]),
     Config.
 
 %%--------------------------------------------------------------------
@@ -30,6 +32,8 @@ init_per_suite(Config) ->
 %% @end
 %%--------------------------------------------------------------------
 end_per_suite(_Config) ->
+    dbg:ctpl(),
+    dbg:stop(),
     ok.
 
 %%--------------------------------------------------------------------
@@ -104,9 +108,11 @@ all() ->
      worker_death_while_full, worker_death_while_full_no_overflow,pool_full_nonblocking_no_overflow,
      pool_full_nonblocking,owner_death,checkin_after_exception_in_transaction,
      pool_returns_status, demonitors_previously_waiting_processes,
-     demonitors_when_checkout_cancelled, 
+     demonitors_when_checkout_cancelled, worker_call_child, worker_call_child_twice,
+     child_worker_death,
      default_strategy_lifo,lifo_strategy, fifo_strategy, reuses_waiting_monitor_on_worker_exit,
-     transaction_timeout_without_exit,transaction_timeout
+     transaction_timeout_without_exit,transaction_timeout,
+     promise_checkout, promise_transaction, promise_invalid_transaction, promise_transaction_with_exception
     ].
 
 %% Tell a worker to exit and await its impending doom.
@@ -282,6 +288,78 @@ pool_empty_no_overflow(_Config) ->
     ?assertEqual(0, length(pool_call(Pid, get_all_monitors))),
     ok = pool_call(Pid, stop).
 
+worker_call_child(_Config) ->
+    {ok, Pid} = new_pool(5, 2),
+    [A|_Workers] = [async_poolboy:checkout(Pid) || _ <- lists:seq(0, 6)],
+    ?assertEqual(0, queue:len(pool_call(Pid, get_avail_workers))),
+    ?assertEqual(7, length(pool_call(Pid, get_all_workers))),
+    Self = self(),
+    Action = 
+        fun() ->
+                async_poolboy:transaction(
+                  Pid,
+                  fun(Worker) ->
+                          gen_server:call(Worker, {action, fun() -> timer:sleep(800) end})
+                  end)
+        end,
+    spawn(
+      fun() ->
+              Result = gen_server:call(A, {action, Action}, 5000),
+              Self ! {got_worker, Result}
+      end),
+    timer:sleep(500),
+    ?assertEqual(8, length(pool_call(Pid, get_all_workers))),
+    receive
+        {got_worker, WorkerResult} -> 
+            ?assert(true),
+            ?assertEqual(ok, WorkerResult)
+    after
+        500 -> ?assert(false)
+    end,
+    ?assertEqual(7, length(pool_call(Pid, get_all_workers))),
+    ok.
+
+worker_call_child_twice(_Config) ->
+    {ok, Pid} = new_pool(5, 2),
+    [A,B|_Workers] = [async_poolboy:checkout(Pid) || _ <- lists:seq(0, 6)],
+    ?assertEqual(0, queue:len(pool_call(Pid, get_avail_workers))),
+    ?assertEqual(7, length(pool_call(Pid, get_all_workers))),
+    Self = self(),
+    Action = 
+        fun() ->
+                async_poolboy:checkout(Pid),
+                Self ! got_worker_1,
+                async_poolboy:checkout(Pid),
+                Self ! got_worker_2
+        end,
+    spawn(
+      fun() ->
+              gen_server:call(A, {action, Action}, infinity)
+      end),
+    timer:sleep(200),
+    ?assertEqual(8, length(pool_call(Pid, get_all_workers))),
+    receive
+        got_worker_1 ->
+            ?assert(true)
+    after
+        500 -> ?assert(false)
+    end,
+    receive
+        got_worker_2 ->
+            ?assert(false)
+    after
+        500 -> ?assert(true)
+    end,
+    ?assertEqual(8, length(pool_call(Pid, get_all_workers))),
+    async_poolboy:checkin(Pid, B),
+    receive
+        got_worker_2 ->
+            ?assert(true)
+    after
+        500 -> ?assert(false)
+    end,    
+    ok.
+
 worker_death(_Config) ->
     %% Check that dead workers are only restarted when the pool is not full
     %% and the overflow count is 0. Meaning, don't restart overflow workers.
@@ -301,6 +379,63 @@ worker_death(_Config) ->
     ?assertEqual(5, length(pool_call(Pid, get_all_workers))),
     ?assertEqual(4, length(pool_call(Pid, get_all_monitors))),
     ok = pool_call(Pid, stop).
+
+child_worker_death(_Config) ->
+    {ok, Pid} = new_pool(5, 2),
+    [A|_Workers] = [async_poolboy:checkout(Pid) || _ <- lists:seq(0, 6)],
+    ?assertEqual(0, queue:len(pool_call(Pid, get_avail_workers))),
+    ?assertEqual(7, length(pool_call(Pid, get_all_workers))),
+    Self = self(),
+    Action = 
+        fun() ->
+                ChildWorker1 = async_poolboy:checkout(Pid),
+                timer:sleep(1000),
+                kill_worker(ChildWorker1),
+                async_poolboy:checkout(Pid),
+                Self ! got_worker
+        end,
+    spawn(
+      fun() ->
+              gen_server:call(A, {action, Action}, infinity)
+      end),
+    timer:sleep(200),
+    ?assertEqual(8, length(pool_call(Pid, get_all_workers))),
+    receive
+        got_worker ->
+            ?assert(false)
+    after
+        500 -> ?assert(true)
+    end,
+    ?assertEqual(8, length(pool_call(Pid, get_all_workers))),
+    receive
+        got_worker ->
+            ?assert(true)
+    after
+        500 -> ?assert(false)
+    end,
+    ?assertEqual(8, length(pool_call(Pid, get_all_workers))),
+    ok.
+
+worker_with_child_death(_Config) ->
+    {ok, Pid} = new_pool(5, 3),
+    [A|_Workers] = [async_poolboy:checkout(Pid) || _ <- lists:seq(0, 6)],
+    ?assertEqual(0, queue:len(pool_call(Pid, get_avail_workers))),
+    ?assertEqual(7, length(pool_call(Pid, get_all_workers))),
+    Action = 
+        fun() ->
+                async_poolboy:checkout(Pid),
+                async_poolboy:checkout(Pid)
+        end,
+    spawn(
+      fun() ->
+              gen_server:call(A, {action, Action}, infinity)
+      end),
+    timer:sleep(200),
+    ?assertEqual(9, length(pool_call(Pid, get_all_workers))),
+    exit(A, die),
+    timer:sleep(200),
+    ?assertEqual(6, length(pool_call(Pid, get_all_workers))),
+    ok.
 
 worker_death_while_full(_Config) ->
     %% Check that if a worker dies while the pool is full and there is a
@@ -561,6 +696,63 @@ reuses_waiting_monitor_on_worker_exit(_Config) ->
     Pid ! ok,
     ok = pool_call(Pool, stop).
 
+promise_checkout(_Config) ->
+    {ok, Pid} = new_pool(5, 2),
+    _Workers = [async_poolboy:checkout(Pid) || _ <- lists:seq(0, 6)],
+    ?assertEqual(0, queue:len(pool_call(Pid, get_avail_workers))),
+    ?assertEqual(7, length(pool_call(Pid, get_all_workers))),
+    Promise = async_poolboy:promise_checkout(Pid, #{timeout => 500}),
+    Result = async_m:wait(Promise),
+    ?assertEqual({error, timeout}, Result),
+    ?assertEqual(7, length(pool_call(Pid, get_all_workers))),
+    ok.
+
+promise_transaction(_Config) ->
+    {ok, Pid} = new_pool(5, 2),
+    [A|_Workers] = [async_poolboy:checkout(Pid) || _ <- lists:seq(0, 6)],
+    ?assertEqual(0, queue:len(pool_call(Pid, get_avail_workers))),
+    ?assertEqual(7, length(pool_call(Pid, get_all_workers))),
+    Promise = async_poolboy:promise_call(Pid, {action, fun() -> timer:sleep(500) end}),
+    async_poolboy:checkin(Pid, A),
+    Value = async_m:wait(Promise),
+    ?assertEqual({ok, ok}, Value),
+    ?assertEqual(6, length(pool_call(Pid, get_all_workers))),
+    ok.
+
+promise_transaction_with_exception(_Config) ->
+    {ok, Pid} = new_pool(5, 2),
+    [A|_Workers] = [async_poolboy:checkout(Pid) || _ <- lists:seq(0, 6)],
+    ?assertEqual(0, queue:len(pool_call(Pid, get_avail_workers))),
+    ?assertEqual(7, length(pool_call(Pid, get_all_workers))),
+    Promise = 
+        async_poolboy:promise_transaction(
+          Pid, 
+          fun(_Worker) ->
+                  exit(die)
+          end),
+    async_poolboy:checkin(Pid, A),
+    ?assertExit(die, async_m:wait(Promise), "wait dies"),
+    timer:sleep(200),
+    ?assertEqual(6, length(pool_call(Pid, get_all_workers))),
+    ok.
+
+promise_invalid_transaction(_Config) ->
+    {ok, Pid} = new_pool(5, 2),
+    [A|_Workers] = [async_poolboy:checkout(Pid) || _ <- lists:seq(0, 6)],
+    ?assertEqual(0, queue:len(pool_call(Pid, get_avail_workers))),
+    ?assertEqual(7, length(pool_call(Pid, get_all_workers))),
+    Promise = 
+        async_poolboy:promise_transaction(
+          Pid, 
+          fun(_Worker) ->
+                  ok
+          end),
+    async_poolboy:checkin(Pid, A),
+    ?assertExit({async_promise_expected, ok}, async_m:wait(Promise), "wait dies"),
+    timer:sleep(200),
+    ?assertEqual(6, length(pool_call(Pid, get_all_workers))),
+    ok.
+
 get_monitors(Pid) ->
     %% Synchronise with the Pid to ensure it has handled all expected work.
     _ = sys:get_status(Pid),
@@ -580,3 +772,5 @@ new_pool(Size, MaxOverflow, Strategy) ->
 
 pool_call(ServerRef, Request) ->
     gen_server:call(ServerRef, Request).
+
+

@@ -14,7 +14,10 @@
 -include_lib("erlando/include/do.hrl").
 -include_lib("erlando/include/gen_fun.hrl").
 
--export([promise_checkout/1, checkin/2, call/3, promise_call/3, transaction/3, promise_transaction/3]).
+-export([promise_checkout/1, promise_checkout/2, 
+         call/2, call/3, 
+         promise_call/2, promise_call/3, 
+         promise_transaction/2, promise_transaction/3]).
 
 -export([child_spec/2, child_spec/3, child_spec/4, start/1, start/2, start_link/1, start_link/2]).
 
@@ -28,6 +31,8 @@
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          terminate/2, code_change/3, format_status/2]).
+
+-define(TIMEOUT, 5000).
 
 -define(SERVER, ?MODULE).
 
@@ -110,11 +115,11 @@ promise_checkout(Pool) ->
     promise_checkout(Pool, #{}).
 
 promise_checkout(Pool, Options) ->
-    Options1 = maps:merge(#{pid => self()}, Options),
+    Block = maps:get(block, Options, true),
     Timeout = maps:get(timeout, Options, infinity),
     Ref = make_ref(),
     do([async_m ||
-           Reply <- async_m:lift_final_reply(async_gen_server:promise_call(Pool, {checkout, Ref, Options1}, Timeout)),
+           Reply <- async_m:lift_final_reply(async_gen_server:promise_call(Pool, {checkout, Ref, Block}, Timeout)),
            case Reply of
                {error, Reason} ->
                    gen_server:cast(Pool, {cancel_waiting, Ref}),
@@ -124,19 +129,36 @@ promise_checkout(Pool, Options) ->
            end
        ]).
 
+call(Pool, Args) ->
+    call(Pool, Args, #{}).
+
 call(Pool, Args, Options) ->
     Promise = promise_call(Pool, Args, Options),
     async_m:wait(Promise).
 
+promise_call(Pool, Args) ->
+    promise_call(Pool, Args, #{}).
+
 promise_call(Pool, Args, Options) ->
     promise_transaction(Pool, fun(Worker) -> async_gen_server:promise_call(Worker, Args) end, Options).
+
+promise_transaction(Pool, Fun) ->
+    promise_transaction(Pool, Fun, #{}).
 
 promise_transaction(Pool, Fun, Options) ->
     do([async_m ||
            Worker <- promise_checkout(Pool, Options),
-           Value <- try_fun(Pool, Fun, Worker),
-           ok = checkin(Pool, Worker),
-           return(Value)
+           case try_fun(Pool, Fun, Worker) of
+               {async_t, _} = Async ->
+                   do([async_m || 
+                          Value <- Async,
+                          ok = checkin(Pool, Worker),
+                          return(Value)
+                      ]);
+               Other ->
+                   ok = checkin(Pool, Worker),
+                   exit({async_promise_expected, Other})
+           end
        ]).
 %%--------------------------------------------------------------------
 %% @doc
@@ -367,7 +389,7 @@ try_fun(Pool, Fun, Worker) ->
         Fun(Worker)
     catch
         Raise:Exception:Stacktrace ->
-            checkin(Pool, Worker),
+            ok = checkin(Pool, Worker),
             erlang:raise(Raise, Exception, Stacktrace)
     end.
 
