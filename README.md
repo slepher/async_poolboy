@@ -11,7 +11,7 @@ but with these features added
 
 promise_call/2, promise_call/3, promise_transaction/2, promise_transaction/3
 
-## poolboy worker checkout worker
+## poolboy worker checkout strategy changed
 
 * while a poolboy worker firstime checkout a poolboy worker, a new worker is created.
 * while the last process checkouted by a poolboy worker checkin, the worker checkedin is destroyed.
