@@ -145,7 +145,6 @@ transaction_timeout_without_exit(_Config) ->
     ?assertEqual(WorkerList, pool_call(Pid, get_all_workers)),
     ?assertEqual({ready,1,0,0}, pool_call(Pid, status)).
 
-
 transaction_timeout(_Config) ->
     {ok, Pid} = new_pool(1, 0),
     ?assertEqual({ready,1,0,0}, pool_call(Pid, status)),
@@ -704,10 +703,13 @@ promise_checkout(_Config) ->
     Promise = async_poolboy:promise_checkout(Pid, #{timeout => 500}),
     Result = async_m:wait(Promise),
     ?assertEqual({error, timeout}, Result),
+    ?assertEqual(0, queue:len(pool_call(Pid, get_avail_workers))),
     ?assertEqual(7, length(pool_call(Pid, get_all_workers))),
     ok.
 
 promise_transaction(_Config) ->
+    dbg:tpl(async_poolboy, checkout, cx),
+    dbg:tpl(async_poolboy, checkin, cx),
     {ok, Pid} = new_pool(5, 2),
     [A|_Workers] = [async_poolboy:checkout(Pid) || _ <- lists:seq(0, 6)],
     ?assertEqual(0, queue:len(pool_call(Pid, get_avail_workers))),
@@ -716,6 +718,7 @@ promise_transaction(_Config) ->
     async_poolboy:checkin(Pid, A),
     Value = async_m:wait(Promise),
     ?assertEqual({ok, ok}, Value),
+    ?assertEqual(0, queue:len(pool_call(Pid, get_avail_workers))),
     ?assertEqual(6, length(pool_call(Pid, get_all_workers))),
     ok.
 
@@ -733,6 +736,7 @@ promise_transaction_with_exception(_Config) ->
     async_poolboy:checkin(Pid, A),
     ?assertExit(die, async_m:wait(Promise), "wait dies"),
     timer:sleep(200),
+    ?assertEqual(0, queue:len(pool_call(Pid, get_avail_workers))),
     ?assertEqual(6, length(pool_call(Pid, get_all_workers))),
     ok.
 
@@ -750,6 +754,7 @@ promise_invalid_transaction(_Config) ->
     async_poolboy:checkin(Pid, A),
     ?assertExit({async_promise_expected, ok}, async_m:wait(Promise), "wait dies"),
     timer:sleep(200),
+    ?assertEqual(0, queue:len(pool_call(Pid, get_avail_workers))),
     ?assertEqual(6, length(pool_call(Pid, get_all_workers))),
     ok.
 
@@ -772,5 +777,3 @@ new_pool(Size, MaxOverflow, Strategy) ->
 
 pool_call(ServerRef, Request) ->
     gen_server:call(ServerRef, Request).
-
-

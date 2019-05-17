@@ -1,4 +1,4 @@
-:name "async"
-:node-name "async"
+:name "async_poolboy"
+:node-name "async_poolboy"
 :lib-dirs '("_build/default/lib" "_checkouts" "_build/test/lib")
 :app-include-dirs '("include")

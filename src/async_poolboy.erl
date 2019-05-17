@@ -26,7 +26,6 @@
                                             transaction/3, stop/1, status/1]}).
 
 %% API
--export([start_link/0]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -151,27 +150,15 @@ promise_transaction(Pool, Fun, Options) ->
            case try_fun(Pool, Fun, Worker) of
                {async_t, _} = Async ->
                    do([async_m || 
-                          Value <- Async,
+                          Value <- async_m:lift_final_reply(Async),
                           ok = checkin(Pool, Worker),
-                          return(Value)
+                          async_m:pure_return(Value)
                       ]);
                Other ->
                    ok = checkin(Pool, Worker),
                    exit({async_promise_expected, Other})
            end
        ]).
-%%--------------------------------------------------------------------
-%% @doc
-%% Starts the server
-%% @end
-%%--------------------------------------------------------------------
--spec start_link() -> {ok, Pid :: pid()} |
-                      {error, Error :: {already_started, pid()}} |
-                      {error, Error :: term()} |
-                      ignore.
-start_link() ->
-    gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
-
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
